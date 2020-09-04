@@ -1,0 +1,555 @@
+;-------------------------------------------------------------------;
+;   AUTHOR: DENIS KAMAU KAMINDU					    ;
+;   REG NO: F17/35594/2013					    ;
+;   DATE:   30TH JUNE 2018					    ;
+;   VERSION: X							    ;
+;   TITLE:  MICRO-CONTROLLER BASED WEIGHING MACHINE		    ;
+;   DESCRIPTION: MEASUREMENT OF WEIGHT BY USE OF A LOAD CELL	    ;
+;   CREDITS: PICLIST.COM AND MY CLASSMATES			    ;
+;-------------------------------------------------------------------;   
+    list p = 16f690     
+
+#include "p16f690.inc"
+
+; CONFIG
+; __config 0xFFD4
+ __CONFIG _FOSC_INTRCIO & _WDTE_OFF & _PWRTE_OFF & _MCLRE_OFF & _CP_OFF & _CPD_OFF & _BOREN_ON & _IESO_ON & _FCMEN_ON
+ ERRORLEVEL -302,-207,-305
+ 
+#define	    RS	    RB7
+#define	    EN	    RB6     
+;-------------------------------------------------------------------;
+;	    MEMORY ADDRESS 20H IS A GENERAL PURPOSE REGISTER	    ;
+;		THIS IS WHERE WE PUT OUR VARIABLES		    ;
+;-------------------------------------------------------------------; 
+    cblock 20H  
+	BITCOUNT
+	LOOPCOUNT
+	bcd3
+	bcd2
+	d1
+	d2
+	d3
+	bcd1
+	bcd0
+	hold
+	countA
+	countB
+	counter
+	w_temp
+	status_temp
+	pclath_temp
+	temp_lcd
+	TempL
+    ENDC
+ 
+    UDATA_SHR				;PROVIDES A METHOD OF ACCESSING VARIABLES WITHOUT ACCESSING BANKSEL
+	Convert	    res	    2		;RESERVED 2BYTES(16BIT) OF DATA FOR CONVERT
+	bcd33	    res	    2		;RESERVED 2BYTES(16BITS) OF DATA FOR BCD33
+	bcd22	    res	    2		;RESERVED 2BYTES(16BITS) OF DATA FOR BCD22
+	UPBYTE	    res	    1		;RESERVE 1 BYTE OF DATA TO ADC CONVERSION
+	LOWBYTE	    res	    1		;RESERVE 1 BYTE OF DATA TO ADC CONVERSION
+	MULTIPLIER  res	    1		;RESERVE 1BYTE OF SPACE TO THE MULTIPLIER
+	REMB	    res	    2		;RESERVE 2BYTES OF SPACE FOR THE REMAINDER
+	BARGB	    res	    2		;RESERVE 2BYTES OF SPACE FOR DENOMINATOR
+	
+    UDATA
+	PRODUCT		res 3
+	MINUEND		res 2
+	MULTIPLICAND	res 2
+	MULTIPLICANDRGB	res 3		;RESERVE 3BYTES OF SPACE FOR THE QUOTIENT
+    ORG		0x00
+    GOTO	START
+
+    ORG		0x04
+    GOTO	ISR_handler		;THE ISR SUBROUTINE
+
+START					;START HERE
+;-------------------------------------------------------------------;
+;	    SETTING THE CLOCK IN THE INTERNAL OSCILLATOR AT 4MHZ    ;
+;-------------------------------------------------------------------;
+    
+    BANKSEL	    OSCCON		;SELECT INTERNAL OSCILLATOR 
+    MOVLW	    b'01100101'		;as the clock source 
+    MOVFW	    OSCCON		;at 4MHz
+;-------------------------------------------------------------------;
+;	    SETTING PORTC AND PORTB AS OUTPUTS 			    ;
+;-------------------------------------------------------------------;
+    BANKSEL	    TRISA		;CHANGING LOCATION TO BANK2
+    CLRF	    TRISC		;PORTC AS OUTPUT
+    CLRF	    TRISB		;PORTB AS OUTPUT    
+;-------------------------------------------------------------------;
+;		    SETTING ALL PINS LOW			    ;
+;-------------------------------------------------------------------;
+    BANKSEL	    PORTA		;SELECTING BANK0
+    CLRF	    PORTA		;ALL PINS IN PORTA LOW
+    CLRF	    PORTB		;ALL PINS IN PORTB LOW
+    CLRF	    PORTC		;ALL PINS IN PORTC LOW
+;-------------------------------------------------------------------;
+;	    I HAVE NO IDEA WHAT THIS PART DOES			    ;
+;-------------------------------------------------------------------;
+    BANKSEL	    INTCON
+    BSF		    INTCON,GIE		;Enable all unmasked/GLOBAL interrupts.
+    BSF		    INTCON,PEIE		;ENABLE ALL PERIPHERAL INTERRUPTS 
+    MOVLW	    b'00110001'
+    MOVWF	    T1CON		;enable Timer1, with 1:8 prescaler
+    BANKSEL	    PIE1
+    MOVLW	    b'10000101'		;enable Timer1 Overflow and
+    MOVWF	    PIE1		
+    BANKSEL	    OPTION_REG
+    BSF		    OPTION_REG,T0CS
+    BCF		    OPTION_REG,T0SE
+;-------------------------------------------------------------------;
+;	   CLEAR EVERYTHING FROM THE TEMPORARY ADDRESSES	    ;
+;-------------------------------------------------------------------;
+    CLRF	    TempL
+    CALL	    INIT_LCD		;THIS FUNCTION INITIALIZES THE LCD
+    CALL	    TIMER_SETTINGS
+;-------------------------------------------------------------------;
+;			CONFIGURING THE ADC			    ;
+;-------------------------------------------------------------------; 
+ADC_SETUP:
+    BANKSEL	    ADCON1
+    MOVLW	    b'01100000'
+    MOVWF	    ADCON1		;FOSC/64. GIVES A CONVERSION TIME OF 8.0 MICROSEC (DATASHEET)
+    BANKSEL	    TRISA
+    BSF		    PORTA, 4		;SET RA4 AS INPUT FOR SENSOR 
+    BANKSEL	    ANSEL
+    BSF		    ANSEL, 3		;CONFIGURE RA4 (CHANNEL AN3) AS AN ANALOG INPUT
+    BANKSEL	    ADCON0 
+    MOVLW	    b'10001101'		;RIGHT JUSTIFY|USE VDD AS VREF|SELECT CHANNEL AN3 (RA4)|ENABLE ADC
+    MOVWF	    ADCON0
+    CALL	    delay_100us
+    
+    GOTO	    MAIN
+;-------------------------------------------------------------------;
+;	   THIS IS THE MAIN PROGRAM LOOP			    ;
+;-------------------------------------------------------------------; 
+MAIN:
+    BSF		    ADCON0,GO		;START THE CONVERSION PROCESS
+AGAIN:
+    BTFSC	    ADCON0,GO		;CHECK WHETHER CONVERSION IS DONE
+    GOTO	    AGAIN		;IF NOT COMPLETE GO BACK
+    
+    BANKSEL	    ADRESH
+    MOVF	    ADRESH,W		;MOVE UPPER TWO BITS OF THE 10-BIT ADC CONVERSION INTO WREG
+    BANKSEL	    UPBYTE  
+    MOVWF	    UPBYTE		;STORE UPPER TWO BYTES INTO UPBYTE REGISTER
+    BANKSEL	    ADRESL
+    MOVF	    ADRESL,W		;MOVE LOWER 8-BITS OF ADC INTO WREG
+    BANKSEL	    LOWBYTE		
+    MOVWF	    LOWBYTE		;STORE THIS RESULT INTO LOWBYTE
+    
+    CALL	    SUBTRACTION
+    CALL	    MULTIPLICATION_SUBROUTINE
+    CALL	    BINARY_TO_BCD
+    CALL	    Display
+    GOTO	    MAIN
+    
+;-------------------------------------------------------------------;
+;		    SUBTRACTING 1023 FROM VALUE OBTAINED	    ;
+;-------------------------------------------------------------------;
+SUBTRACTION:
+    CLRF	MINUEND
+    CLRF	MINUEND+1
+    
+    MOVLW	0xFF
+    MOVWF	MINUEND
+    MOVLW	0x03
+    MOVWF	MINUEND+1
+    MOVF	LOWBYTE,W
+    SUBWF	MINUEND
+    MOVF	UPBYTE,W
+    BTFSS	STATUS,C
+    INCFSZ	UPBYTE,W
+    SUBWF	MINUEND+1
+        
+    RETURN
+;-------------------------------------------------------------------;
+;		    MULTIPLICATION SUB-ROUTINE			   ;
+;-------------------------------------------------------------------;
+MULTIPLICATION_SUBROUTINE:
+    ;HERE WE PERFORM A 16*4BIT MULTIPLICATION
+    ;RESULT STORED IN UPBYTE&LOWBYTE MULTIPLIE BY 10
+    
+    MOVF	MINUEND,W		;MOVING THE VALUE OF LOWBYTE TO WREG
+    MOVWF	MULTIPLICAND		;MOVING THIS VALUE TO MULTIPLICAND REGITSER
+    MOVF	MINUEND+1,W		;MOVING THE VALUE OF UPBYTE TO WREG
+    MOVWF	MULTIPLICAND+1		;MOVING THIS VALUE INTO UPPER BYTE OF MULTIPLICAND
+    MOVLW	0x0A			;MULTIPLIER (10)
+    MOVWF	MULTIPLIER		;MOVING 10 TO THE MULTIPLIER
+    CLRF	PRODUCT+2		;CLEARING THE RESULT AT THE START OF THE 24BIT REG
+    CLRF	PRODUCT+1		;CLEAR THE RESULT AT THE MIDDLE 
+    CLRF	PRODUCT			;CLEARING THE PRODUCT AT THE BOTTOM OF THE REGISTER
+    MOVLW	0x08			
+    MOVWF	BITCOUNT		;BIT COUNTER SET AT NUMBER OF BITS IN MULTIPLIER
+    GOTO	MULTIPLY
+   
+MULTIPLY:
+    RLF		PRODUCT,f		;ROTATE RESULF LEFT
+    RLF		PRODUCT+1,f		
+    RLF		PRODUCT+2,f
+    BTFSS	MULTIPLIER,7		;TEST MSB OF THE MULTIPLIER
+    GOTO	DONTADD
+    MOVFW	MULTIPLICAND		;ADD THE 16-BIT OF MULTIPLICAND TO PRODUCT
+    ADDWF	PRODUCT,f		
+    SKPNC
+    INCF	PRODUCT+1,f
+    MOVFW	MULTIPLICAND+1
+    ADDWF	PRODUCT+1,f
+    SKPNC
+    INCF	PRODUCT+2,f
+DONTADD:
+    RLF		MULTIPLIER,f
+    DECFSZ	BITCOUNT,f
+    GOTO	MULTIPLY
+    GOTO	FXD2416U
+    
+;-------------------------------------------------------------------;
+;		DIVISION BY 1024 SUBROUTINE			    ;
+;-------------------------------------------------------------------;
+; Inputs:							    ;
+;   Dividend - MULTIPLICANDRGB0:MULTIPLICANDRGB1:MULTIPLICANDRGB2   ;
+;   Divisor  - BARGB0:BARGB1					    ;
+; Temporary:							    ;
+;   Counter  - LOOPCOUNT					    ;
+;   Remainder- REMB0:REMB1					    ;
+; Output:							    ;
+;   Quotient - MULTIPLICANDRGB0:MULTIPLICANDRGB1:MULTIPLICANDRGB2   ;
+;								    ;
+;       Size: 28						    ;
+; Max timing: 4+24*(6+6+4+3+6)-1+3+2=608 cycles (with RETURN)	    ;
+; Min timing: 4+24*(6+6+5+6)-1+3+2=560 cycles (with RETURN)	    ;
+;-------------------------------------------------------------------;
+FXD2416U:
+    CLRF	REMB+1
+    CLRF	REMB
+    MOVLW	D'24'
+    MOVWF	LOOPCOUNT
+    MOVF	PRODUCT,W		;MOVING THE PRODUCT TO THE WREG(LSB)
+    MOVWF	MULTIPLICANDRGB		;MOVING THE PRODUCT TO THE NUMERATOR(LSB)
+    MOVF	PRODUCT+1,W		;MOVING THE PRODUCT TO THE WREG
+    MOVWF	MULTIPLICANDRGB+1	;MOVING THE PRODUCT TO THE NUMERATOR
+    MOVF	PRODUCT+2,W		;MOVING THE PRODUCT TO THE WREG(MSB)
+    MOVWF	MULTIPLICANDRGB+2	;MOVING THE PRODUCT TO THE NUMERATOR(MSB)
+    MOVLW	0xFF			;MOVING FF TO THE WREG
+    MOVWF	BARGB			;MOVE FF TO THE DENOMINATOR
+    MOVLW	0x03			;MOVE 3 TO THE WREG
+    MOVWF	BARGB+1			;THIS IN TOTAL MAKES 1023 IN DECIMAL
+    GOTO	LOOPU2416
+    
+LOOPU2416:
+    RLF		MULTIPLICANDRGB,f	;SHIFT LEFT DIVIDER TO PASS NEXT BIT TO REMAINDER
+    RLF		MULTIPLICANDRGB+1,f
+    RLF		MULTIPLICANDRGB+2,f
+    RLF		REMB,f
+    RLF		REMB+1,f
+    RLF		LOOPCOUNT,f
+    MOVF	BARGB, W		;SUBTRACT DIVISOR FROM REMAINDER
+    SUBWF	REMB, F
+    MOVF	BARGB+1, W
+    BTFSS	STATUS, C
+    INCFSZ	BARGB+1, W
+    SUBWF	REMB+1, W 
+    SKPNC				;IF NO BORROW
+    BSF		LOOPCOUNT, 0		;SET BIT 0 OF COUNTER(SAVED CARRY)
+    BTFSC	LOOPCOUNT, 0		;IF NO BORROW
+    GOTO	UOK46LL			;JUMP
+    MOVF	BARGB, W		;RESTORE REMAINDER IF BORROW
+    ADDWF	REMB, F
+    MOVF	REMB+1, W		;READ HIGH BYTE OF REMAINDER TO W
+    
+UOK46LL:
+    MOVWF	REMB+1			;STORE HIGH BYTE OF REMAINDER
+    CLRC				;COPY BIT 0 TO CARRYy
+    RRF		LOOPCOUNT, F		;RESTORE THE COUNTER
+    DECFSZ	LOOPCOUNT, f		;DECREMENT COUNTER
+    GOTO	LOOPU2416	        ;REPEAT LOOP IF NOT ZERO
+    RLF		MULTIPLICANDRGB, F      ;SHIFT IN LAST BIT OF RESULT
+    RLF		MULTIPLICANDRGB+1, F   
+    RLF		MULTIPLICANDRGB+2, F
+    RETURN
+;-------------------------------------------------------------------;
+;	    THE INTERRUPT HANDLER INITIALIZATION		   ;
+;-------------------------------------------------------------------;
+ISR_handler:			        ;THIS IS RESPONSIBLE FOR HANDLING INTERRUPTS
+    MOVWF	w_temp			;SAVE CURRENT W REGISTER CONTENTS
+    MOVF	STATUS,w		;MOVE STATUS REGISTER INTO W REGISTER
+    MOVWF	status_temp		;SAVE CONTENTS OF STATUS REGISTER
+    MOVF	PCLATH,w		;MOVE PCLATH REGISTER CONTENTS INTO W REGISTER
+    MOVWF	pclath_temp		;SAVE CONTENTS OF THE PCLATH REGISTER
+;-------------------------------------------------------------------;
+;	    THIS IS THE ROUTINE FOR HANDLING INTERRUPTS		    ;
+;-------------------------------------------------------------------;
+    BANKSEL	PIR1
+    BTFSS	PIR1,TMR1IF		;CHECK IF TIMER1 OVERFLOW OCCURED
+    GOTO	end_interrupt		;IF TIMER 1 DIDNT OVERFLOW,EXIT ISR
+    INCF	counter,1		;THIS COUNTER CAPTURES THE NUMBER OF TIMER1 HAS OVERFLOWED
+    BCF		PIR1,TMR1IF		;RESET TIMER1 OVERFLOW FLAG  
+    MOVFW	counter
+    SUBLW	0x03
+    SKPZ
+    GOTO	end_interrupt
+    BANKSEL	TMR0
+    MOVFW	TMR0
+    MOVWF	TempL
+    CLRF	TMR0
+    CALL	TIMER_SETTINGS    
+;-------------------------------------------------------------------;
+;	    EXIT THE INTERRUPT SUBROUTINE			    ;
+;-------------------------------------------------------------------;
+end_interrupt:
+    BCF		    INTCON,RABIF	;CLEAR RABIF
+    MOVF	    pclath_temp,w	;RETRIEVE COPY OF PCLATH REGISTER
+    MOVWF	    PCLATH		;RESTORE PRE-ISR PCLATH REGISTER CONTENTS
+    MOVF	    status_temp,w	;RETRIEVE COPY OF STATUS REGISTER
+    MOVWF	    STATUS		;RESTORE PRE-ISR STATUS REGISTER CONTENTS
+    SWAPF	    w_temp,f		;SWAPS UPPER/LOWER NIBBLES OFW_TEMP INTO ITSELF
+    SWAPF	    w_temp,w		;swaps upper/lower nibbles of w_temp into w
+    RETFIE				;return from interrupt
+;-------------------------------------------------------------------;
+;			    TIMER SETTINGS			    ;
+;-------------------------------------------------------------------;
+TIMER_SETTINGS:    
+    MOVLW	    0x01
+    MOVWF	    counter
+    MOVLW	    0xB6
+    BANKSEL	    TMR1L
+    MOVWF	    TMR1L
+    MOVLW	    0x17
+    MOVWF	    TMR1H
+    RETURN
+;-------------------------------------------------------------------;
+;	    FUNCTION FOR INITIALIZING LCD	    		    ;
+;-------------------------------------------------------------------;
+INIT_LCD:
+    CALL	    delay_1ms
+    NOP
+    MOVLW	    0x30		;SETTING 8BIT MODE
+    CALL	    LCD_CMD		;PUSHES COMMANDS TO THE LCD
+    MOVLW	    0x38		;FUNCTION THAT SETS 4BIT,2LINES,STD FONT
+    CALL	    LCD_CMD		;PUSHES COMMANDS TO THE LCD
+    MOVLW	    0x0C		;DISPLAY ON CURSOR OFF
+    CALL	    LCD_CMD		;PUSHES COMMANDS TO THE LCD
+    CALL	    delay_500ms
+    RETURN
+;-------------------------------------------------------------------;
+;		SENDING COMMANDS TO THE LCD	    		    ;
+;-------------------------------------------------------------------;
+LCD_CMD:				;SUBROUTINE TITLE
+    BANKSEL	    PORTC
+    MOVWF	    temp_lcd 
+    MOVWF	    PORTC
+    BCF		    PORTB,RS		;SETTING RS LOW FOR SENDING COMMANDS
+    BSF		    PORTB,EN		;SET THE LCD ENABLE PIN HIGH
+    NOP
+    CALL	    delay_1ms
+    BCF		    PORTB,EN
+    CALL	    delay_1ms		;DELAY FOR FINISHING INSTRUCTION CYCLE
+    RETURN
+;-------------------------------------------------------------------;
+;	    SENDING CHARACTERS TO THE LCD	    		    ;
+;-------------------------------------------------------------------; 
+LCD_CHAR:				;SUBROUTINE FOR SENDING CHARACTERS
+    
+    BANKSEL	    PORTC
+    MOVWF	    temp_lcd 
+    MOVWF	    PORTC		;SENDING HIGH NIBBLE TO LCD
+    BSF		    PORTB,RS		;RS=1,SENDING DATA TO THE LCD
+    BSF		    PORTB,EN		;ENABLE LCD
+    CALL	    delay_1ms
+    NOP
+    BCF		    PORTB,EN
+    CALL	    delay_1ms
+    RETURN
+;-------------------------------------------------------------------;
+;		  WHAT TO DISPLAY ON THE SCREEN	    		    ;
+;-------------------------------------------------------------------;
+Display:				;DISPLAYING CHARACTERS ON THE SCREEN
+    CALL	    delay_1ms
+    MOVLW	    0x80		;CURSOR AT START OF ROW 1
+    CALL	    LCD_CMD		;SENDING COMMANDS TO LCD
+    MOVLW	    "W"
+    CALL	    LCD_CHAR		;SENDING CHARACTERS TO LCD
+    MOVLW	    "E"
+    CALL	    LCD_CHAR
+    MOVLW	    "I"
+    CALL	    LCD_CHAR
+    MOVLW	    "G"
+    CALL	    LCD_CHAR
+    MOVLW	    "H"
+    CALL	    LCD_CHAR
+    MOVLW	    "T"
+    CALL	    LCD_CHAR
+    MOVLW	    " "
+    CALL	    LCD_CHAR
+    MOVLW	    "M"
+    CALL	    LCD_CHAR
+    MOVLW	    "E"
+    CALL	    LCD_CHAR
+    MOVLW	    "A"
+    CALL	    LCD_CHAR
+    MOVLW	    "S"
+    CALL	    LCD_CHAR
+    MOVLW	    "U"
+    CALL	    LCD_CHAR
+    MOVLW	    "R"
+    CALL	    LCD_CHAR
+    MOVLW	    "E"
+    CALL	    LCD_CHAR
+    MOVLW	    "D"
+    CALL	    LCD_CHAR
+    MOVLW	    ":"
+    CALL	    LCD_CHAR
+;-------------------------------------------------------------------;
+;		 DISPLAY THE VALUE OBTAINED FROM SENSOR		    ;
+;-------------------------------------------------------------------;
+    CALL	    delay_1ms
+    MOVLW	    0xC0		;CURSOR AT START OF ROW 2 
+    CALL	    LCD_CMD
+    MOVF	    bcd2,0
+    CALL	    LCD_CHAR
+    MOVF	    bcd1,w
+    CALL	    LCD_CHAR
+    MOVF	    bcd0,w
+    CALL	    LCD_CHAR
+    MOVLW	    "K"
+    CALL	    LCD_CHAR
+    MOVLW	    "G"
+    CALL	    LCD_CHAR
+    MOVLW	    "S"
+    CALL	    LCD_CHAR
+    CALL	    delay_500ms
+    CALL	    delay_500ms
+    RETURN
+;-------------------------------------------------------------------;
+;			DELAY SUBROUTINES	    		    ;
+;-------------------------------------------------------------------;
+
+delay_100us:
+    MOVLW	    0x19
+    MOVWF	    countA
+d0:
+    DECFSZ	    countA
+    GOTO	    d0
+    RETURN
+ 
+delay_1ms:
+    MOVLW	    0x0B 
+    MOVWF	    countB
+do1:
+    CALL	    delay_100us
+    DECFSZ	    countB
+    GOTO	    do1
+    RETURN
+    
+delay_500ms:
+   	movlw	0x03
+	movwf	d1
+	movlw	0x18
+	movwf	d2
+	movlw	0x02
+	movwf	d3
+Delay_0:
+	decfsz	d1, f
+	goto	$+2
+	decfsz	d2, f
+	goto	$+2
+	decfsz	d3, f
+	goto	Delay_0
+
+			;6 cycles
+	goto	$+1
+	goto	$+1
+	goto	$+1
+;-------------------------------------------------------------------;
+;		    BINARY TO DECIMAL CONVERSION		    ;
+;-------------------------------------------------------------------;
+BINARY_TO_BCD:
+    MOVF	MULTIPLICANDRGB,0
+    MOVWF	Convert
+    MOVF	MULTIPLICANDRGB+1,0
+    MOVWF	Convert+1
+;-------------------------------------------------------------------;
+    CLRF	bcd3
+    CLRF	bcd2
+    CLRF	bcd1
+    CLRF	bcd0
+    MOVLW	0xE8
+    MOVWF	bcd33
+    MOVLW	0x03
+    MOVWF	bcd33+1			;BCD33=1000
+    MOVLW	0x64
+    MOVWF	bcd22
+    MOVLW	0x00
+    MOVWF	bcd22+1			;BCD22=100
+    
+GET1000S:
+;-------------------------------------------------------------------;
+; SUBTRACTS 1000 FROM CONVERT AND COUNTS HOW MANY TIMES THIS IS DONE;
+;		BEFORE VALUE IS LESS THAN 1000			    ;
+;-------------------------------------------------------------------;    
+;MOVF Convert+1
+    MOVF	bcd33,w			
+    SUBWF	Convert,w		
+    MOVWF	hold			
+    MOVF	bcd33+1,w
+    BTFSS	STATUS,C
+    INCFSZ	bcd33+1,w
+    SUBWF	Convert+1,w
+    BTFSS	STATUS,C		;IF CONVERT IS LESS THAN 1000 GOTO NEXT ROUTINE
+    GOTO	GET100S			;UPDATE HE RESULT OF PREVIOUS SUB TO CONVERT&CONVERT+1
+    MOVWF	Convert+1
+    MOVF	hold,w
+    MOVWF	Convert			;INCREMENT THE COUNTER FOR BCD3
+    INCF	bcd3,f
+    GOTO	GET1000S
+    
+GET100S:
+;-------------------------------------------------------------------;
+; SUBTRACTS 100 FROM CONVERT AND COUNTS HOW MANY TIMES THIS IS DONE ;
+;		BEFORE VALUE IS LESS THAN 100			    ;
+;-------------------------------------------------------------------;    
+    MOVF	bcd22,w
+    SUBWF	Convert,w
+    MOVWF	hold
+    MOVF	bcd22+1,w
+    BTFSS	STATUS,C
+    INCFSZ	bcd22+1,w
+    SUBWF	Convert+1,w
+    BTFSS	STATUS,C		;IF CONLEVEL<100 GO TO NEXT SUBROUTINE
+    GOTO	GET10SAND1S		;UPDATE HE RESULT OF PREVIOUS SUB TO CONVERT&CONVERT+1
+    MOVWF	Convert+1
+    MOVF	hold,w
+    MOVWF	Convert			;INCREMENT THE COUNTER FOR BCD2
+    INCF	bcd2,f
+    GOTO	GET100S
+    
+GET10SAND1S:
+;-------------------------------------------------------------------;
+; SUBTRACTS 10 FROM CONVERT AND COUNTS HOW MANY TIMES THIS IS DONE  ;
+;	BEFORE VALUE IS LESS THAN 10. IF<10 C IS CLEARED	    ;
+;-------------------------------------------------------------------;    
+    MOVLW	d'10'
+    SUBWF	Convert,w		;SUBTRACTS 10 FROM CONVERT
+    BTFSS	STATUS,C		;IF CONVERT IS LESS THAN 10,C WILL BE CLEARED
+    GOTO	ENDBCD
+    MOVWF	Convert
+    INCF	bcd1,f
+    GOTO	GET10SAND1S
+    
+ENDBCD:
+;-------------------------------------------------------------------;
+; CONVERTING 1000S,100S,10S AND BCD0 VALUE TO THEIR ASCII VALUE BY  ;
+;		ADDING D'48' FOR DISPLAY ON THE LCD		    ;
+;-------------------------------------------------------------------; 
+    MOVF	Convert,w
+    MOVWF	bcd0
+    MOVLW	0x30			 
+    ADDWF	bcd0,f			
+    ADDWF	bcd1,f			
+    ADDWF	bcd2,f
+    ADDWF	bcd3,f
+    RETURN
+    
+    END
